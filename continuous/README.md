@@ -29,6 +29,13 @@ pip install -r continuous/requirements.txt
 ```
 
 Notes:
+- **Install `continuous/requirements.txt`, never the root `requirements.txt`** —
+  the root file is the legacy 2020 rlpyt/Atari stack (torch 1.5, gym 0.17,
+  absl-py 0.9) and does not build on modern Python.
+- Using uv instead of conda works too: `uv venv --python 3.11 && source
+  .venv/bin/activate && uv pip install -r continuous/requirements.txt` (then
+  replace the `module load miniconda` / `source activate eipo` lines in the
+  sbatch scripts with `source ~/eipo/.venv/bin/activate`).
 - The H200s (n2) work with the default torch wheel (CUDA 12.x, sm_90). The
   cu128 note in `requirements.txt` is only for Blackwell cards elsewhere.
 - No MuJoCo license/key needed — `gymnasium[mujoco]` ships the simulator.
