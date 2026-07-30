@@ -7,6 +7,10 @@ dependencies = [
     "torch>=2.4",
     "gymnasium[mujoco]>=1.1",
     "gymnasium-robotics>=1.3",
+    # 0.10.x bundles all Atari ROMs in the wheel (0.11+ dropped them, which
+    # breaks on the internet-less compute nodes); do not bump past 0.11.
+    "ale-py>=0.10.1,<0.11",
+    "opencv-python-headless",
     "numpy",
     "tensorboard",
 ]

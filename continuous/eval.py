@@ -78,6 +78,8 @@ def main():
         result = {"env_id": env_id, "seed": train_args["seed"],
                   "episodes": args.episodes, "alpha_final": ckpt.get("alpha")}
         for name, key in [("pi", "actor_pi"), ("pi_prime", "actor_pi_prime")]:
+            if key not in ckpt:  # e.g. KDS checkpoints have a single actor
+                continue
             actor = Actor(obs_dim, act_dim)
             actor.load_state_dict(ckpt[key])
             actor.eval()
@@ -88,11 +90,13 @@ def main():
         out = os.path.join(os.path.dirname(path), "eval.json")
         with open(out, "w") as f:
             json.dump(result, f, indent=2)
-        print(f"{env_id} seed {train_args['seed']}: "
-              f"pi {result['pi']['return_mean']:.1f}±{result['pi']['return_std']:.1f} "
-              f"(success {result['pi']['success_rate']:.2f}) | "
-              f"pi' {result['pi_prime']['return_mean']:.1f}±{result['pi_prime']['return_std']:.1f} "
-              f"-> {out}")
+        msg = (f"{env_id} seed {train_args['seed']}: "
+               f"pi {result['pi']['return_mean']:.1f}±{result['pi']['return_std']:.1f} "
+               f"(success {result['pi']['success_rate']:.2f})")
+        if "pi_prime" in result:
+            msg += (f" | pi' {result['pi_prime']['return_mean']:.1f}"
+                    f"±{result['pi_prime']['return_std']:.1f}")
+        print(f"{msg} -> {out}")
 
 
 if __name__ == "__main__":

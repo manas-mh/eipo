@@ -103,6 +103,20 @@ rlpyt/models/curiosity/disagreement.py). Run names are tagged
 `eipo_rnd` / `eipo_disagreement` and `aggregate.py` reports them as separate
 rows (runs from before this option existed are tagged `eipo_ppo` = RND).
 
+## KDS vs EIPO comparison suite
+
+Three entry points, all supporting `--seed` and launchable with the generic
+packer `sbatch slurm/pack.sbatch <n_seeds> <script.py> [args...]`:
+
+- `kds_vs_eipo.py` (repo root) — SAC base, `--method {kds,eipo}`,
+  `--bonus {disagreement,rnd}`, `--steps 300000`. Writes JSON eval logs.
+- `continuous/kds_ppo_continuous.py` — PPO base KDS for HalfCheetah/AntMaze,
+  `--curiosity {rnd,disagreement}`; pairs with `eipo_ppo_continuous.py` and
+  shares its logging/eval/aggregate tooling (runs tagged `kds_<curiosity>`).
+- `atari/ppo_atari_intrinsic.py` — hard-exploration Atari
+  (ALE/MontezumaRevenge-v5), `--method {eipo,kds}`, conv-RND bonus, 3M or 10M
+  steps. Logs to `results_atari/`.
+
 ## Defaults and knobs
 
 PPO: 16 envs x 256 steps (batch 4096), lr 3e-4, clip 0.2, 4 epochs x 4

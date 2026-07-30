@@ -4,5 +4,7 @@
 torch>=2.4
 gymnasium[mujoco]>=1.1
 gymnasium-robotics>=1.3
+ale-py>=0.10.1,<0.11  # 0.10.x bundles Atari ROMs; 0.11+ does not
+opencv-python-headless
 numpy
 tensorboard
