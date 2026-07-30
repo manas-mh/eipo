@@ -23,8 +23,9 @@
 #SBATCH --error=slurm_outputs/%x_%j.err
 
 module purge
-module load miniconda
-source activate eipo
+# uv-managed venv, created on the master node with `uv sync` (lives on NFS,
+# so it is visible on n2). Jobs must be submitted from the repo root.
+source "${SLURM_SUBMIT_DIR}/.venv/bin/activate"
 
 # Compute nodes have NO internet access: everything (pip packages, wandb, etc.)
 # must already be installed on the master node. TensorBoard logging is local

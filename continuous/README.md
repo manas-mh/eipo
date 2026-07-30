@@ -14,30 +14,32 @@ vectors. Nothing in this directory depends on the rlpyt code or the root
 
 All installs happen on the **master node** (10.16.63.40) — compute nodes have
 no internet access. Everything lands on NFS (`/home`), so it is automatically
-visible on n1/n2. One-time setup:
+visible on n1/n2.
+
+Dependencies are managed with **uv** via the root `pyproject.toml`. One-time
+setup:
 
 ```bash
 ssh <user>@10.16.63.40
-git clone <this repo> && cd eipo
+git clone https://github.com/manas-mh/eipo.git && cd eipo
 mkdir -p slurm_outputs            # sbatch fails silently without it
 
-module purge
-module load miniconda             # do NOT run conda init (cluster rule)
-conda create -n eipo python=3.11 -y
-source activate eipo
-pip install -r continuous/requirements.txt
+uv sync                           # creates ./.venv and installs everything
+git add uv.lock && git commit -m "Add lockfile"   # commit the lock for reproducibility
 ```
 
+The sbatch scripts activate `./.venv` via `$SLURM_SUBMIT_DIR`, so always submit
+jobs from the repo root. No conda and no `module load miniconda` needed at job
+time.
+
 Notes:
-- **Install `continuous/requirements.txt`, never the root `requirements.txt`** —
-  the root file is the legacy 2020 rlpyt/Atari stack (torch 1.5, gym 0.17,
-  absl-py 0.9) and does not build on modern Python.
-- Using uv instead of conda works too: `uv venv --python 3.11 && source
-  .venv/bin/activate && uv pip install -r continuous/requirements.txt` (then
-  replace the `module load miniconda` / `source activate eipo` lines in the
-  sbatch scripts with `source ~/eipo/.venv/bin/activate`).
-- The H200s (n2) work with the default torch wheel (CUDA 12.x, sm_90). The
-  cu128 note in `requirements.txt` is only for Blackwell cards elsewhere.
+- **The root `requirements.txt` is NOT for this baseline** — it is the legacy
+  2020 rlpyt/Atari stack (torch 1.5, gym 0.17, absl-py 0.9) and does not build
+  on modern Python. `uv sync` uses `pyproject.toml`, which contains only the
+  continuous-control deps (`continuous/requirements.txt` mirrors them for
+  non-uv users). Do not run `uv add -r requirements.txt`.
+- The H200s (n2) work with the default torch wheel (CUDA 12.x, sm_90). For
+  Blackwell cards elsewhere (RTX 5060) use the cu128 torch index.
 - No MuJoCo license/key needed — `gymnasium[mujoco]` ships the simulator.
 
 ## Smoke test (run this before burning cluster time)
@@ -47,8 +49,8 @@ session on n2:
 
 ```bash
 srun --partition=normal --nodelist=n2 --gres=gpu:1 --cpus-per-task=8 --pty bash
-module purge && module load miniconda && source activate eipo
-cd ~/eipo
+module purge
+cd ~/eipo && source .venv/bin/activate
 python continuous/eipo_ppo_continuous.py --env-id HalfCheetah-v4 \
     --total-timesteps 40000 --num-envs 4 --num-steps 128
 python continuous/eipo_ppo_continuous.py --env-id AntMaze_UMaze-v5 \

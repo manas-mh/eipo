@@ -21,8 +21,9 @@
 #SBATCH --error=slurm_outputs/%x_%A_%a.err
 
 module purge
-module load miniconda
-source activate eipo
+# uv-managed venv, created on the master node with `uv sync` (lives on NFS,
+# so it is visible on n2). Jobs must be submitted from the repo root.
+source "${SLURM_SUBMIT_DIR}/.venv/bin/activate"
 
 export OMP_NUM_THREADS=4
 export MKL_NUM_THREADS=4
