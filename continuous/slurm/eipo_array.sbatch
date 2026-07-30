@@ -1,24 +1,31 @@
 #!/bin/bash
-# Job-array variant: one SLURM task per (env, seed) pair. Use this instead of
-# eipo_pack.sbatch if your cluster allows GPU sharing across jobs (MIG/MPS) or
-# has several GPUs. Submit from the repo root:
+# Tanuh AI cluster: job-array variant -- one (env, seed) pair per job, one GPU
+# each. With 4 free H200s Slurm will run 4 at a time and queue the rest.
+# Usually eipo_pack.sbatch is the better fit (5 seeds share one GPU); use this
+# when you want each run on its own card.
 #
+# Usage (from the repo root on the master node):
 #   sbatch continuous/slurm/eipo_array.sbatch
 
 #SBATCH --job-name=eipo
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --partition=normal
+#SBATCH --nodelist=n2
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=16G
-#SBATCH --time=48:00:00
-#SBATCH --array=0-9
+#SBATCH --time=24:00:00
+#SBATCH --array=0-9%4
 #SBATCH --output=slurm_outputs/%x_%A_%a.out
 #SBATCH --error=slurm_outputs/%x_%A_%a.err
 
-# --- site-specific setup: EDIT ME ---------------------------------------- #
-# module load cuda/12.8
-source "$HOME/venvs/eipo/bin/activate"   # or: conda activate eipo
-export MUJOCO_GL=egl
-# -------------------------------------------------------------------------- #
+module purge
+module load miniconda
+source activate eipo
+
+export OMP_NUM_THREADS=4
+export MKL_NUM_THREADS=4
 
 ENVS=(HalfCheetah-v4 AntMaze_UMaze-v5)
 STEPS=(3000000 10000000)
