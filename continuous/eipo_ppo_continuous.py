@@ -47,7 +47,8 @@ from torch.utils.tensorboard import SummaryWriter
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument("--exp-name", type=str, default="eipo_ppo")
+    p.add_argument("--exp-name", type=str, default=None,
+                   help="run-name tag; defaults to eipo_<curiosity> (old RND runs used 'eipo_ppo')")
     p.add_argument("--env-id", type=str, default="HalfCheetah-v4")
     p.add_argument("--total-timesteps", type=int, default=3_000_000)
     p.add_argument("--seed", type=int, default=1)
@@ -78,11 +79,14 @@ def parse_args():
                    help="divide extrinsic rewards by a running std of discounted returns. "
                         "Disable for sparse-reward envs such as AntMaze.")
 
-    # RND
-    p.add_argument("--rnd-beta", type=float, default=1.0, help="intrinsic reward scale (prediction_beta)")
+    # Curiosity module
+    p.add_argument("--curiosity", type=str, default="rnd", choices=["rnd", "disagreement"])
+    p.add_argument("--prediction-beta", type=float, default=1.0, help="intrinsic reward scale")
     p.add_argument("--rnd-update-proportion", type=float, default=0.25,
-                   help="fraction of samples used for the predictor loss")
+                   help="RND: fraction of samples used for the predictor loss")
     p.add_argument("--rnd-feature-size", type=int, default=256)
+    p.add_argument("--ensemble-size", type=int, default=5, help="disagreement: number of forward models")
+    p.add_argument("--forward-loss-wt", type=float, default=0.2, help="disagreement: forward loss weight")
 
     # EIPO min-max
     p.add_argument("--minmax-alpha", type=float, default=0.5)
@@ -92,6 +96,8 @@ def parse_args():
     p.add_argument("--minmax-switch", type=str, default="diff", choices=["diff", "none"])
 
     args = p.parse_args()
+    if args.exp_name is None:
+        args.exp_name = f"eipo_{args.curiosity}"
     args.batch_size = args.num_envs * args.num_steps
     args.minibatch_size = args.batch_size // args.num_minibatches
     return args
@@ -273,6 +279,76 @@ class RND(nn.Module):
         return (err * mask).sum() / mask.sum().clamp(min=1.0)
 
 
+class Disagreement(nn.Module):
+    """Ensemble-disagreement curiosity (Pathak et al. 2019), ported from
+    rlpyt/models/curiosity/disagreement.py: N forward models predict the next
+    (normalized) state from (state, action); bonus = beta * mean-over-dims of
+    the ensemble variance. Deviations from the rlpyt version, both needed for
+    state-vector envs: observations are normalized with a running mean/std
+    (clip +-5), and the bonus is done-masked and normalized by a running std of
+    its discounted accumulation exactly like the RND path (the rlpyt algo
+    offered this as -normalize_intreward) so U+/U- mix rewards on a common
+    scale."""
+
+    def __init__(self, obs_dim, act_dim, ensemble_size, beta, gamma_int,
+                 forward_loss_wt, device):
+        super().__init__()
+        self.beta = beta
+        self.forward_loss_wt = forward_loss_wt
+        self.device = device
+        self.obs_dim = obs_dim
+        self.obs_rms = RunningMeanStd(shape=(obs_dim,))
+        self.rew_rms = RunningMeanStd()
+        self.rew_rff = RewardForwardFilter(gamma_int)
+
+        def make_forward_model():
+            return nn.Sequential(
+                layer_init(nn.Linear(obs_dim + act_dim, 256)), nn.ReLU(),
+                layer_init(nn.Linear(256, 256)), nn.ReLU(),
+                layer_init(nn.Linear(256, obs_dim)),
+            )
+        self.ensemble = nn.ModuleList(make_forward_model() for _ in range(ensemble_size))
+
+    def _normalize(self, obs):
+        mean = torch.as_tensor(self.obs_rms.mean, dtype=torch.float32, device=obs.device)
+        std = torch.as_tensor(np.sqrt(self.obs_rms.var), dtype=torch.float32, device=obs.device)
+        return torch.clamp((obs - mean) / (std + 1e-10), -5.0, 5.0)
+
+    def _predictions(self, obs, action):
+        x = torch.cat([self._normalize(obs), action], dim=-1)
+        return torch.stack([m(x) for m in self.ensemble])
+
+    @torch.no_grad()
+    def compute_bonus(self, obs, next_obs, actions, dones):
+        """obs/next_obs: [T, B, D] raw; actions: [T, B, A]; dones: [T, B]."""
+        T, B = obs.shape[:2]
+        not_done = (1.0 - dones).cpu().numpy()
+        preds = self._predictions(obs, actions)          # [N, T, B, D]
+        bonus = preds.var(dim=0).mean(dim=-1)            # [T, B]
+
+        obs_np = obs.cpu().numpy().reshape(T * B, -1)
+        self.obs_rms.update(obs_np)
+
+        bonus_np = bonus.cpu().numpy()
+        rff = np.array([self.rew_rff.update(bonus_np[t], not_done=not_done[t]) for t in range(T)])
+        self.rew_rms.update_from_moments(rff.mean(), rff.var(), not_done.sum())
+        bonus = bonus / float(np.sqrt(self.rew_rms.var) + 1e-10)
+        bonus = bonus * torch.as_tensor(not_done, dtype=torch.float32, device=bonus.device)
+        return self.beta * bonus
+
+    def loss(self, obs, next_obs, actions):
+        """Forward-model loss on a minibatch [N, D]; elementwise dropout p=0.2
+        on the per-dimension errors as in the rlpyt implementation."""
+        target = self._normalize(next_obs).detach()
+        preds = self._predictions(obs.detach(), actions.detach())
+        loss = torch.tensor(0.0, device=obs.device)
+        for pred in preds:
+            err = nn.functional.mse_loss(pred, target, reduction="none")
+            err = nn.functional.dropout(err, p=0.2).sum(-1) / self.obs_dim
+            loss = loss + err.mean()
+        return self.forward_loss_wt * loss
+
+
 # --------------------------------------------------------------------------- #
 # PPO pieces
 # --------------------------------------------------------------------------- #
@@ -329,10 +405,17 @@ def main():
     actor_pi = Actor(obs_dim, act_dim).to(device)        # max-player, extrinsic + intrinsic
     actor_pi_prime = Actor(obs_dim, act_dim).to(device)  # min-player, extrinsic only
     critic = Critic(obs_dim).to(device)
-    rnd = RND(obs_dim, args.rnd_feature_size, args.rnd_beta, args.gamma_int,
-              args.rnd_update_proportion, device).to(device)
+    if args.curiosity == "rnd":
+        curiosity = RND(obs_dim, args.rnd_feature_size, args.prediction_beta,
+                        args.gamma_int, args.rnd_update_proportion, device).to(device)
+        curiosity_params = list(curiosity.predictor.parameters())
+    else:
+        curiosity = Disagreement(obs_dim, act_dim, args.ensemble_size,
+                                 args.prediction_beta, args.gamma_int,
+                                 args.forward_loss_wt, device).to(device)
+        curiosity_params = list(curiosity.ensemble.parameters())
     params = (list(actor_pi.parameters()) + list(actor_pi_prime.parameters())
-              + list(critic.parameters()) + list(rnd.predictor.parameters()))
+              + list(critic.parameters()) + curiosity_params)
     optimizer = torch.optim.Adam(params, lr=args.learning_rate, eps=1e-5)
 
     obs_rms = RunningMeanStd(shape=(obs_dim,))
@@ -351,7 +434,8 @@ def main():
     # rollout storage
     T, B = args.num_steps, args.num_envs
     obs_buf = torch.zeros((T, B, obs_dim), device=device)          # normalized (policy input)
-    next_obs_buf = torch.zeros((T, B, obs_dim), device=device)     # raw (RND input)
+    raw_obs_buf = torch.zeros((T, B, obs_dim), device=device)      # raw (curiosity input)
+    next_obs_buf = torch.zeros((T, B, obs_dim), device=device)     # raw (curiosity input)
     act_buf = torch.zeros((T, B, act_dim), device=device)
     logp_buf = torch.zeros((T, B), device=device)                  # behavior-policy logprob
     rew_buf = torch.zeros((T, B), device=device)                   # raw extrinsic
@@ -385,6 +469,7 @@ def main():
 
         for t in range(T):
             global_step += B
+            raw_obs_buf[t] = torch.as_tensor(raw_next_obs, dtype=torch.float32, device=device)
             n_obs = norm_obs(raw_next_obs)
             obs_buf[t] = n_obs
             with torch.no_grad():
@@ -413,7 +498,10 @@ def main():
                 ep_ret[i], ep_len[i], ep_success[i] = 0.0, 0, 0.0
 
         # ---- rewards ---------------------------------------------------- #
-        int_rew = rnd.compute_bonus(next_obs_buf, done_buf)  # [T, B], done-masked, normalized
+        if args.curiosity == "rnd":
+            int_rew = curiosity.compute_bonus(next_obs_buf, done_buf)  # [T, B], done-masked, normalized
+        else:
+            int_rew = curiosity.compute_bonus(raw_obs_buf, next_obs_buf, act_buf, done_buf)
 
         if args.normalize_ext_reward:
             rew_np = rew_buf.cpu().numpy()
@@ -444,6 +532,7 @@ def main():
 
         # ---- optimize ----------------------------------------------------#
         b_obs = obs_buf.reshape(T * B, obs_dim)
+        b_raw_obs = raw_obs_buf.reshape(T * B, obs_dim)
         b_next_obs = next_obs_buf.reshape(T * B, obs_dim)
         b_act = act_buf.reshape(T * B, act_dim)
         b_logp = logp_buf.reshape(T * B)
@@ -482,8 +571,11 @@ def main():
                     v_loss = args.vf_coef * 0.5 * (((v - b_ret_E_pi[mb]) ** 2).mean()
                                                    + ((v_int - b_ret_I[mb]) ** 2).mean())
 
-                rnd_loss = rnd.loss(b_next_obs[mb])
-                loss = pi_loss + pr_loss + v_loss - args.ent_coef * entropy + rnd_loss
+                if args.curiosity == "rnd":
+                    curiosity_loss = curiosity.loss(b_next_obs[mb])
+                else:
+                    curiosity_loss = curiosity.loss(b_raw_obs[mb], b_next_obs[mb], b_act[mb])
+                loss = pi_loss + pr_loss + v_loss - args.ent_coef * entropy + curiosity_loss
 
                 optimizer.zero_grad()
                 loss.backward()
@@ -516,7 +608,7 @@ def main():
         writer.add_scalar("losses/policy_loss", pi_loss.item(), global_step)
         writer.add_scalar("losses/pi_prime_loss", pr_loss.item(), global_step)
         writer.add_scalar("losses/value_loss", v_loss.item(), global_step)
-        writer.add_scalar("losses/rnd_loss", rnd_loss.item(), global_step)
+        writer.add_scalar("losses/curiosity_loss", curiosity_loss.item(), global_step)
         writer.add_scalar("charts/intrinsic_reward_mean", int_rew.mean().item(), global_step)
         if alpha_grads:
             writer.add_scalar("eipo/alpha_grad", float(np.mean(alpha_grads)), global_step)
@@ -533,8 +625,8 @@ def main():
             "actor_pi": actor_pi.state_dict(),
             "actor_pi_prime": actor_pi_prime.state_dict(),
             "critic": critic.state_dict(),
-            "rnd_predictor": rnd.predictor.state_dict(),
-            "rnd_target": rnd.target.state_dict(),
+            "curiosity_type": args.curiosity,
+            "curiosity": curiosity.state_dict(),
             "obs_rms": {"mean": obs_rms.mean, "var": obs_rms.var, "count": obs_rms.count},
             "alpha": alpha,
             "args": vars(args),

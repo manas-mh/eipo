@@ -21,12 +21,15 @@ import numpy as np
 from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 
 
-def tb_final(run_dir, tag, last_k=10):
+def tb_final(run_dir, tag, last_k=10, max_step=None):
     ea = EventAccumulator(run_dir, size_guidance={"scalars": 0})
     ea.Reload()
     if tag not in ea.Tags()["scalars"]:
         return None
-    vals = [s.value for s in ea.Scalars(tag)]
+    scalars = ea.Scalars(tag)
+    if max_step is not None:
+        scalars = [s for s in scalars if s.step <= max_step]
+    vals = [s.value for s in scalars]
     return float(np.mean(vals[-last_k:])) if vals else None
 
 
@@ -39,15 +42,18 @@ def fmt(mean, std=None, nd=1):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--logdir", default="results_continuous")
+    p.add_argument("--max-step", type=int, default=None,
+                   help="only use training scalars logged at global_step <= this "
+                        "(e.g. 300000 to compare all algorithms at 3e5 steps)")
     args = p.parse_args()
 
     by_env = defaultdict(list)
-    for run_dir in sorted(glob.glob(os.path.join(args.logdir, "*__eipo_ppo__*"))):
+    for run_dir in sorted(glob.glob(os.path.join(args.logdir, "*__*__seed*__*"))):
         name = os.path.basename(run_dir)
-        env_id = name.split("__")[0]
+        env_id, exp_name = name.split("__")[:2]
         row = {"run": name,
-               "train_return": tb_final(run_dir, "charts/episodic_return"),
-               "train_success": tb_final(run_dir, "charts/success_rate")}
+               "train_return": tb_final(run_dir, "charts/episodic_return", max_step=args.max_step),
+               "train_success": tb_final(run_dir, "charts/success_rate", max_step=args.max_step)}
         eval_path = os.path.join(run_dir, "eval.json")
         if os.path.exists(eval_path):
             with open(eval_path) as f:
@@ -55,32 +61,33 @@ def main():
             row["eval_return"] = ev["pi"]["return_mean"]
             row["eval_success"] = ev["pi"]["success_rate"]
             row["alpha_final"] = ev.get("alpha_final")
-        by_env[env_id].append(row)
+        by_env[(env_id, exp_name)].append(row)
 
-    md = ["| Environment | Seeds | Train return (final) | Eval return (deterministic π) | Eval success rate |",
-          "|---|---|---|---|---|"]
-    csv_rows = [["env", "n_seeds", "train_return_mean", "train_return_std",
+    step_note = f" (train metrics at step <= {args.max_step:,})" if args.max_step else ""
+    md = [f"| Environment | Algorithm | Seeds | Train return{step_note} | Eval return (deterministic π) | Eval success rate |",
+          "|---|---|---|---|---|---|"]
+    csv_rows = [["env", "algo", "n_seeds", "train_return_mean", "train_return_std",
                  "eval_return_mean", "eval_return_std", "eval_success_mean", "eval_success_std"]]
 
-    for env_id, rows in sorted(by_env.items()):
+    for (env_id, exp_name), rows in sorted(by_env.items()):
         tr = [r["train_return"] for r in rows if r["train_return"] is not None]
         er = [r["eval_return"] for r in rows if r.get("eval_return") is not None]
         es = [r["eval_success"] for r in rows if r.get("eval_success") is not None]
         is_maze = "maze" in env_id.lower()
-        md.append("| {} | {} | {} | {} | {} |".format(
-            env_id, len(rows),
+        md.append("| {} | {} | {} | {} | {} | {} |".format(
+            env_id, exp_name, len(rows),
             fmt(np.mean(tr) if tr else None, np.std(tr) if tr else None),
             fmt(np.mean(er) if er else None, np.std(er) if er else None),
             fmt(np.mean(es) if es and is_maze else None,
                 np.std(es) if es and is_maze else None, nd=2)))
-        csv_rows.append([env_id, len(rows),
+        csv_rows.append([env_id, exp_name, len(rows),
                          np.mean(tr) if tr else "", np.std(tr) if tr else "",
                          np.mean(er) if er else "", np.std(er) if er else "",
                          np.mean(es) if es else "", np.std(es) if es else ""])
 
     md_body = "\n".join(md)
     per_seed = ["", "Per-seed detail:", ""]
-    for env_id, rows in sorted(by_env.items()):
+    for (env_id, exp_name), rows in sorted(by_env.items()):
         for r in rows:
             per_seed.append(f"- {r['run']}: train {fmt(r['train_return'])}, "
                             f"eval {fmt(r.get('eval_return'))}, "

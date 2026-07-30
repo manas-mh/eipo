@@ -95,6 +95,14 @@ For TensorBoard, run it on the master node (it's lightweight) and tunnel:
 Wandb (`--track`) will NOT work from compute nodes (no internet) — stick to
 TensorBoard, or sync offline runs from the master node afterwards.
 
+## Curiosity modules
+
+`--curiosity rnd` (default) or `--curiosity disagreement` (ensemble of 5 MLP
+forward models; bonus = ensemble prediction variance, ported from
+rlpyt/models/curiosity/disagreement.py). Run names are tagged
+`eipo_rnd` / `eipo_disagreement` and `aggregate.py` reports them as separate
+rows (runs from before this option existed are tagged `eipo_ppo` = RND).
+
 ## Defaults and knobs
 
 PPO: 16 envs x 256 steps (batch 4096), lr 3e-4, clip 0.2, 4 epochs x 4
