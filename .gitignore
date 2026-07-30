@@ -21,6 +21,8 @@ configs/*
 # HPC Launch files and logs
 *.sh
 logs
+slurm_outputs/
+results_continuous/
 
 # Graph files
 *.dot

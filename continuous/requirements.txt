@@ -1,0 +1,8 @@
+# EIPO continuous-control baseline (standalone; does NOT use the root requirements.txt)
+# For NVIDIA Blackwell GPUs (e.g. RTX 5060), install torch from the cu128 index instead:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu128
+torch>=2.4
+gymnasium[mujoco]>=1.1
+gymnasium-robotics>=1.3
+numpy
+tensorboard
