@@ -41,7 +41,11 @@ and pi_mix (trained on the merged reward (1+alpha)*r_extrinsic + r_intrinsic,
 matching the paper's J_{E+I}^alpha objective directly below their Eq. 4) -- with
 a single scalar alpha updated by dual ascent (Eq. 32/34) using an off-policy
 one-step Q-value gap between the two policies' extrinsic value estimates, in
-place of the on-policy Monte Carlo return gap used in the original paper. This
+place of the on-policy Monte Carlo return gap used in the original paper. The
+gap is normalized by |J_E| and step-clipped before the alpha update, mirroring
+the clipped surrogate alpha-gradient of the original PPO implementation
+(without this, the raw Q-scale gap saturated alpha at its clip bound on every
+environment/bonus combination tested). This
 is a faithful adaptation of the *mechanism*, not a re-implementation of the
 original PPO-based code -- report it as such if used in a rebuttal or paper.
 (A PPO-based re-implementation of the original EIPO is in
@@ -507,8 +511,8 @@ def train_kds(env_key, seed, total_steps, batch_size=256, start_steps=10000,
 # -----------------------------------------------------------------------------
 
 def train_eipo(env_key, seed, total_steps, batch_size=256, start_steps=10000,
-               alpha_init=0.5, alpha_lr=1e-3, eval_every=5000, log_path=None,
-               bonus_type="disagreement"):
+               alpha_init=0.5, alpha_lr=2e-4, alpha_g_clip=0.05,
+               eval_every=5000, log_path=None, bonus_type="disagreement"):
     env = make_env(env_key, seed)
     torch.manual_seed(seed)
     np.random.seed(seed)
@@ -559,7 +563,12 @@ def train_eipo(env_key, seed, total_steps, batch_size=256, start_steps=10000,
 
             # dual ascent on alpha (Eq. 32/34): alpha <- alpha - beta*(J_E(pi_mix)-J_E(pi_E)),
             # approximated off-policy via a one-step Q-gap under pi_E's own extrinsic
-            # critic, evaluated at both policies' actions on the current batch of states
+            # critic, evaluated at both policies' actions on the current batch of states.
+            # The gap is normalized by |J_E| and its step clipped (mirroring the clipped
+            # surrogate alpha-gradient of the original PPO EIPO): the raw Q-gap is in
+            # Q-value units (hundreds), and applying it unclipped once per gradient step
+            # drove alpha to the clip bound on every env/bonus tested, degenerating the
+            # baseline into a fixed reward mix.
             with torch.no_grad():
                 a_E_batch, _ = pi_E.pi(o)
                 a_mix_batch, _ = pi_mix.pi(o)
@@ -567,7 +576,9 @@ def train_eipo(env_key, seed, total_steps, batch_size=256, start_steps=10000,
                 J_mix_extrinsic = torch.min(
                     pi_E.q1(o, a_mix_batch), pi_E.q2(o, a_mix_batch)
                 ).mean().item()
-            alpha = float(np.clip(alpha - alpha_lr * (J_mix_extrinsic - J_E), 1e-3, 10.0))
+            gap = (J_mix_extrinsic - J_E) / (abs(J_E) + 1e-6)
+            gap = float(np.clip(gap, -alpha_g_clip, alpha_g_clip))
+            alpha = float(np.clip(alpha - alpha_lr * gap, 1e-3, 10.0))
 
         if (t + 1) % eval_every == 0:
             ret, succ = evaluate(env_key, pi_mix, seed + 1000)
