@@ -21,7 +21,10 @@ import re
 import numpy as np
 from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 
-BONUS_TAGS = {"RND": ("eipo_ppo", "eipo_rnd"), "Disagreement": ("eipo_disagreement",)}
+BONUS_TAGS = {"EIPO (RND)": ("eipo_ppo", "eipo_rnd"),
+              "EIPO (Disagreement)": ("eipo_disagreement",),
+              "KDS (RND)": ("kds_rnd",),
+              "KDS (Disagreement)": ("kds_disagreement",)}
 ENV_METRIC = [("HalfCheetah-v4", "charts/episodic_return", "return", 1),
               ("AntMaze_UMaze-v5", "charts/success_rate", "success rate", 2)]
 
@@ -57,11 +60,11 @@ def main():
                             vals.append(v)
                             used.append(os.path.basename(run))
             if vals:
-                print(f"  EIPO ({bonus:12s}) ---> {np.mean(vals):.{nd}f} ± {np.std(vals):.{nd}f}   (n={len(vals)})")
+                print(f"  {bonus:20s} ---> {np.mean(vals):.{nd}f} ± {np.std(vals):.{nd}f}   (n={len(vals)})")
                 for u, v in zip(used, vals):
                     print(f"      {u}: {v:.{nd}f}")
             else:
-                print(f"  EIPO ({bonus:12s}) ---> no runs found")
+                print(f"  {bonus:20s} ---> no runs found")
         print()
 
 
