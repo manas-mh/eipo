@@ -1,12 +1,15 @@
-"""Aggregate EIPO runs into a shareable table (markdown + CSV).
+"""Aggregate runs into a shareable table (markdown + CSV).
 
-Collects, per environment across seeds:
-  - final training return (mean of the last 10 logged points of
-    charts/episodic_return in the TensorBoard events), and
-  - deterministic eval results from eval.json if continuous/eval.py was run.
+Collects, per (environment, algorithm) across seeds:
+  - PPO runs (TensorBoard dirs in --logdir): final training return, plus
+    deterministic eval from eval.json if continuous/eval.py was run;
+  - SAC runs (kds_vs_eipo.py JSON logs, --sac-dir): the in-training
+    deterministic eval curve, reported as the mean of the last 3 eval points
+    (algorithm tagged sac_<method>_<bonus>).
 
 Usage:
-  python continuous/aggregate.py [--logdir results_continuous]
+  python continuous/aggregate.py [--logdir results_continuous] [--sac-dir .]
+  python continuous/aggregate.py --max-step 300000   # budget-matched metrics
 Writes <logdir>/summary.md and <logdir>/summary.csv and prints the table.
 """
 
@@ -33,6 +36,37 @@ def tb_final(run_dir, tag, last_k=10, max_step=None):
     return float(np.mean(vals[-last_k:])) if vals else None
 
 
+SAC_ENV_NAMES = {"halfcheetah": "HalfCheetah-v4", "antmaze": "AntMaze_UMaze (SAC ids vary)"}
+
+
+def sac_json_rows(sac_dir, max_step=None, last_k=3):
+    """Parse kds_vs_eipo.py logs named <method>_<bonus>_<env>_seed<N>.json."""
+    import re
+    rows = defaultdict(list)
+    for path in sorted(glob.glob(os.path.join(sac_dir, "*_seed*.json"))):
+        m = re.match(r"(kds|eipo)_(disagreement|rnd)_(halfcheetah|antmaze)_seed(\d+)\.json$",
+                     os.path.basename(path))
+        if not m:
+            continue
+        method, bonus, env_key, seed = m.groups()
+        with open(path) as f:
+            log = json.load(f)
+        pts = [(s, r, u) for s, r, u in zip(log["steps"], log["eval_return"],
+                                            log.get("eval_success", [None] * len(log["steps"])))
+               if max_step is None or s <= max_step]
+        if not pts:
+            continue
+        tail = pts[-last_k:]
+        row = {"run": os.path.basename(path),
+               "train_return": None,
+               "eval_return": float(np.mean([r for _, r, _ in tail])),
+               "eval_success": (float(np.mean([u for _, _, u in tail]))
+                                if tail[0][2] is not None else None),
+               "alpha_final": (log["alpha"][-1] if log.get("alpha") else None)}
+        rows[(SAC_ENV_NAMES[env_key], f"sac_{method}_{bonus}")].append(row)
+    return rows
+
+
 def fmt(mean, std=None, nd=1):
     if mean is None:
         return "-"
@@ -42,6 +76,8 @@ def fmt(mean, std=None, nd=1):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--logdir", default="results_continuous")
+    p.add_argument("--sac-dir", default=".",
+                   help="directory containing kds_vs_eipo.py JSON logs")
     p.add_argument("--max-step", type=int, default=None,
                    help="only use training scalars logged at global_step <= this "
                         "(e.g. 300000 to compare all algorithms at 3e5 steps)")
@@ -62,6 +98,9 @@ def main():
             row["eval_success"] = ev["pi"]["success_rate"]
             row["alpha_final"] = ev.get("alpha_final")
         by_env[(env_id, exp_name)].append(row)
+
+    for key, rows in sac_json_rows(args.sac_dir, max_step=args.max_step).items():
+        by_env[key].extend(rows)
 
     step_note = f" (train metrics at step <= {args.max_step:,})" if args.max_step else ""
     md = [f"| Environment | Algorithm | Seeds | Train return{step_note} | Eval return (deterministic π) | Eval success rate |",
