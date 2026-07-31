@@ -75,7 +75,8 @@ def fmt(mean, std=None, nd=1):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--logdir", default="results_continuous")
+    p.add_argument("--logdir", nargs="+", default=["results_continuous", "results_atari"],
+                   help="TensorBoard results dirs to scan (summary is written to the first)")
     p.add_argument("--sac-dir", default=".",
                    help="directory containing kds_vs_eipo.py JSON logs")
     p.add_argument("--max-step", type=int, default=None,
@@ -84,7 +85,9 @@ def main():
     args = p.parse_args()
 
     by_env = defaultdict(list)
-    for run_dir in sorted(glob.glob(os.path.join(args.logdir, "*__*__seed*__*"))):
+    run_dirs = [d for logdir in args.logdir
+                for d in sorted(glob.glob(os.path.join(logdir, "*__*__seed*__*")))]
+    for run_dir in run_dirs:
         name = os.path.basename(run_dir)
         env_id, exp_name = name.split("__")[:2]
         row = {"run": name,
@@ -134,14 +137,15 @@ def main():
                             f"alpha {fmt(r.get('alpha_final'), nd=3)}")
     md_body += "\n" + "\n".join(per_seed)
 
-    os.makedirs(args.logdir, exist_ok=True)
-    with open(os.path.join(args.logdir, "summary.md"), "w") as f:
+    out_dir = args.logdir[0]
+    os.makedirs(out_dir, exist_ok=True)
+    with open(os.path.join(out_dir, "summary.md"), "w") as f:
         f.write(md_body + "\n")
-    with open(os.path.join(args.logdir, "summary.csv"), "w", newline="") as f:
+    with open(os.path.join(out_dir, "summary.csv"), "w", newline="") as f:
         csv.writer(f).writerows(csv_rows)
 
     print(md_body)
-    print(f"\nwrote {args.logdir}/summary.md and {args.logdir}/summary.csv")
+    print(f"\nwrote {out_dir}/summary.md and {out_dir}/summary.csv")
 
 
 if __name__ == "__main__":
